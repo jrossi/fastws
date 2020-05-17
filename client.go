@@ -14,7 +14,62 @@ import (
 var (
 	// ErrCannotUpgrade shows up when an error ocurred when upgrading a connection.
 	ErrCannotUpgrade = errors.New("cannot upgrade connection")
+	defaultWSClient *WSClient
 )
+
+func init() {
+	defaultWSClient = &WSClient{
+		Instance: &fasthttp.Client{
+			TLSConfig: &tls.Config{
+				InsecureSkipVerify: false,
+				MinVersion:         tls.VersionTLS11,
+			},
+		},
+	}
+}
+
+type WSClient struct {
+	Instance *fasthttp.Client
+}
+
+func (ws *WSClient) Dial(url string, req *fasthttp.Request) (conn *Conn, err error) {
+	uri := fasthttp.AcquireURI()
+	defer fasthttp.ReleaseURI(uri)
+	uri.Update(url)
+
+	scheme := "https"
+	port := ":443"
+	if bytes.Equal(uri.Scheme(), wsString) {
+		scheme, port = "http", ":80"
+	}
+	uri.SetScheme(scheme)
+
+	addr := bytePool.Get().([]byte)
+	defer bytePool.Put(addr)
+
+	addr = append(addr[:0], uri.Host()...)
+	if n := bytes.LastIndexByte(addr, ':'); n == -1 {
+		addr = append(addr, port...)
+	}
+
+	var c net.Conn
+
+	if scheme == "http" {
+		c, err = net.Dial("tcp", b2s(addr))
+	} else {
+		c, err = tls.Dial("tcp", b2s(addr), ws.Instance.TLSConfig.Clone())
+	}
+	if err == nil {
+		conn, err = client(c, uri.String(), req)
+		if err != nil {
+			c.Close()
+		}
+	}
+	return conn, err
+}
+
+
+
 
 // Client returns Conn using existing connection.
 //
@@ -81,52 +136,14 @@ func client(c net.Conn, url string, r *fasthttp.Request) (conn *Conn, err error)
 //
 // url parameter must follow WebSocket URL format i.e. ws://host:port/path
 func Dial(url string) (*Conn, error) {
-	return dial(url, nil)
+	return defaultWSClient.Dial(url, nil)
 }
 
 // DialWithHeaders establishes a websocket connection as client sending a personalized request.
 func DialWithHeaders(url string, req *fasthttp.Request) (*Conn, error) {
-	return dial(url, req)
+	return defaultWSClient.Dial(url, req)
 }
 
-func dial(url string, req *fasthttp.Request) (conn *Conn, err error) {
-	uri := fasthttp.AcquireURI()
-	defer fasthttp.ReleaseURI(uri)
-	uri.Update(url)
-
-	scheme := "https"
-	port := ":443"
-	if bytes.Equal(uri.Scheme(), wsString) {
-		scheme, port = "http", ":80"
-	}
-	uri.SetScheme(scheme)
-
-	addr := bytePool.Get().([]byte)
-	defer bytePool.Put(addr)
-
-	addr = append(addr[:0], uri.Host()...)
-	if n := bytes.LastIndexByte(addr, ':'); n == -1 {
-		addr = append(addr, port...)
-	}
-
-	var c net.Conn
-
-	if scheme == "http" {
-		c, err = net.Dial("tcp", b2s(addr))
-	} else {
-		c, err = tls.Dial("tcp", b2s(addr), &tls.Config{
-			InsecureSkipVerify: false,
-			MinVersion:         tls.VersionTLS11,
-		})
-	}
-	if err == nil {
-		conn, err = client(c, uri.String(), req)
-		if err != nil {
-			c.Close()
-		}
-	}
-	return conn, err
-}
 
 func makeRandKey(b []byte) []byte {
 	b = extendByteSlice(b, 16)
